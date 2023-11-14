@@ -85,6 +85,8 @@ if [ "$RobotFrameworkVersion" == "" ]; then
 	else
 		RobotFrameworkVersion="manual_build"
 	fi
+
+	echo "RobotFramework AIO (OSS) ${RobotFrameworkVersion}" > version.txt
 fi
 
 echo -e $COL_GREEN"RobotFrameworkVersion = $RobotFrameworkVersion"$COL_RESET
@@ -294,6 +296,8 @@ function build_debian()
 
 	cp ./config/build/dpkg_build/postinst.sh ./output_lx/${PACK_NAME}/usr/local/bin/initRobotFrameworkAIO.sh
 
+	# Update version
+	cp ./version.txt /opt/rfwaio/
 
 	logresult "$?" "prepared package build" "prepare package build"
 
