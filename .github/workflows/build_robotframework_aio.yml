@@ -8,12 +8,19 @@ on:
   pull_request:
     types:
       - closed
+      - opened
+      - synchronize
     branches: 
       - develop
   workflow_dispatch:
 
+  repository_dispatch:
+    types:
+      - TRIGGER_AIO
+
 env:
   GITHUB_PAT : ${{ secrets.PAT_GITHUB }} 
+  GH_TOKEN: ${{ github.token }}
   TRIGGER_BY: ${{ github.ref_type }}
   TAG_NAME: ${{ github.ref_name }}
   REF_NAME: ${{ github.ref_name }}
@@ -23,14 +30,14 @@ env:
   BUNDLE_NAME: --bundle_name "RobotFramework AIO"
   GENDOC_PLANTUML_PATH: "../robotvscode/data/extensions/jebbs.plantuml-2.17.5"
   INSTALLER_LOCATION: "https://github.com/test-fullautomation/RobotFramework_AIO/releases"
+
 jobs:
   tag-repos:
     name: Tag all related repositories
     runs-on: ubuntu-latest
     if: github.ref_type == 'tag'
-
     steps:
-    - name: Checkout source
+    - name: Checkout source   
       uses: actions/checkout@v3
 
     - name: Install dependencies
@@ -39,10 +46,33 @@ jobs:
     - name: Tag repositories
       run: python ./tools/git-tag/git-tag.py "$TAG_NAME" ./config/repositories/tag_repos.json
 
+    - name: Generate release info
+      run: python ./tools/release_info/release_info.py "$TAG_NAME" ./config/repositories/tag_repos.json
+
+  trigger-aio:
+    runs-on: ubuntu-latest
+    name: Listen event trigger
+    if: github.event.action == 'TRIGGER_AIO'
+    outputs:
+      repository: ${{ steps.extract_data.outputs.REPOSITORY }}
+      branch: ${{ steps.extract_data.outputs.PULL_MERGE_BRANCH }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Extract request data
+        id: extract_data
+        run: |
+          # Extract value from request JSON payload
+          repository=$(jq -r .client_payload.repository $GITHUB_EVENT_PATH)
+          branch=$(jq -r .client_payload.branch $GITHUB_EVENT_PATH)
+          echo "REPOSITORY=${repository#test-fullautomation/}"  >> "$GITHUB_OUTPUT"
+          echo "PULL_MERGE_BRANCH=$branch"  >> "$GITHUB_OUTPUT"
+
   build-linux:
     name: Build Linux package
     runs-on: ubuntu-latest
-    needs: tag-repos
+    needs: [ tag-repos , trigger-aio ]
     # if: always() && needs.tag-repos.result != 'failure' && needs.tag-repos.result != 'cancelled'
     if: ${{ ! failure() && ! cancelled() }}
 
@@ -60,6 +90,9 @@ jobs:
           echo "AIO_VERSION=${TAG_NAME#[rd]e[vl]/aio/}" >> $GITHUB_ENV
           echo "BUNDLE_VERSION_DATE=--bundle_version_date \"$(date +%m.%Y)\"" >> $GITHUB_ENV
           echo "BUNDLE_VERSION=--bundle_version \"${TAG_NAME#[rd]e[vl]/aio/}\"" >> $GITHUB_ENV
+          # Environment variable for trigger process
+          echo "REPOSITORY=${{needs.trigger-aio.outputs.repository}}" >> $GITHUB_ENV
+          echo "PULL_REQUEST_BRANCH=${{needs.trigger-aio.outputs.branch}}" >> $GITHUB_ENV
 
       - name: Clone repositories
         run: |
@@ -85,7 +118,7 @@ jobs:
   build-windows:
     name: Build Windows package
     runs-on: windows-latest
-    needs: tag-repos
+    needs: [ tag-repos , trigger-aio ]
     if: ${{ ! failure() && ! cancelled() }}
 
     steps:
@@ -104,10 +137,14 @@ jobs:
           echo "AIO_VERSION=${TAG_NAME#[rd]e[vl]/aio/}" >> $GITHUB_ENV
           echo "BUNDLE_VERSION_DATE=--bundle_version_date \"$(date +%m.%Y)\"" >> $GITHUB_ENV
           echo "BUNDLE_VERSION=--bundle_version \"${TAG_NAME#[rd]e[vl]/aio/}\"" >> $GITHUB_ENV
+          echo "REPOSITORY=${{needs.trigger-aio.outputs.repository}}" >> $GITHUB_ENV
+          echo "PULL_REQUEST_BRANCH=${{needs.trigger-aio.outputs.branch}}" >> $GITHUB_ENV
 
       - name: Clone repositories
         shell: bash
-        run: ./cloneall
+        run: |
+          chmod +x ./cloneall
+          ./cloneall
 
       - name: Install
         shell: bash
@@ -126,7 +163,7 @@ jobs:
   install-test-windows:
     name: Test Windows package
     runs-on: windows-latest
-    needs: build-windows
+    needs: [ build-windows  , trigger-aio ]
     if: ${{ ! failure() && ! cancelled() }}
     env:
       RobotPythonPath: "C:/Program Files/RobotFramework/python39"
@@ -142,7 +179,11 @@ jobs:
 
     - name: Clone repositories
       shell: bash
-      run: ./cloneall
+      run: |
+        export REPOSITORY="${{needs.trigger-aio.outputs.repository}}"
+        export PULL_REQUEST_BRANCH="${{needs.trigger-aio.outputs.branch}}"
+        chmod +x ./cloneall
+        ./cloneall
 
     - name: Download Windows installer package
       uses: actions/download-artifact@v3
@@ -180,7 +221,7 @@ jobs:
   install-test-linux:
     name: Test Linux package
     runs-on: ubuntu-latest
-    needs: build-linux
+    needs: [ build-linux , trigger-aio ]
     if: ${{ ! failure() && ! cancelled() }}
 
     steps:
@@ -189,6 +230,8 @@ jobs:
 
     - name: Clone repositories
       run: |
+        export REPOSITORY="${{needs.trigger-aio.outputs.repository}}"
+        export PULL_REQUEST_BRANCH="${{needs.trigger-aio.outputs.branch}}"
         chmod +x ./cloneall
         ./cloneall
 
@@ -288,3 +331,50 @@ jobs:
       run: |
         chmod +x ./tools/git-tag/tag_repos_with_their_version_file.sh
         ./tools/git-tag/tag_repos_with_their_version_file.sh ./config/repositories/publish_pypi_repos.txt
+
+  update-version-aio:
+    name: Update version AIO
+    runs-on: ubuntu-latest
+    needs: [install-test-windows, install-test-linux]
+    if: ${{ ! failure() && ! cancelled() && github.ref_type == 'tag' }}
+
+    steps:
+    - name: Checkout source
+      uses: actions/checkout@v3
+
+    - name: Set Up Git User
+      run: |
+        git config user.email "huavanthong14@gmail.com"
+        git config user.name "Thong Hua"
+    
+    - name: Checkout automation branch
+      run: |
+        tag_branch=automation/task/update_controlfile_version
+        echo $tag_branch > tag_branch.txt
+        git checkout -b $tag_branch
+
+    - name: Update version AIO on control file
+      run: |
+        export AIO_VERSION=${TAG_NAME#[rd]e[vl]/aio/}
+        . ./include/bash/common.sh && update_debian_control_file
+      
+    - name: Commit Changes
+      run: |
+        tag_branch=$(cat tag_branch.txt)
+        git add ./config/build/dpkg_build/control
+        git commit -m "Auto commit from GitHub Actions"
+        git push -u -f origin $tag_branch
+
+    - name: Create Pull Request
+      run: |
+        tag_branch=$(cat tag_branch.txt)
+        gh pr create \
+        --base develop --head $tag_branch \
+        --title "Auto-generated pull request for updating control file" \
+        --body "This PR was automatically generated by GitHub Actions." \
+        --assignee test-fullautomation \
+        --reviewer huavanthong
+
+    - name: Clean up
+      run: |  
+        rm tag_branch.txt
